@@ -1,0 +1,12 @@
+[submodule "darknet"]
+	path = darknet
+	url = https://github.com/AlexeyAB/darknet.git
+[submodule "label-studio-ml-backend"]
+	path = label-studio-ml-backend
+	url = https://github.com/heartexlabs/label-studio-ml-backend
+[submodule "tensorflow-yolov4-tflite"]
+	path = tensorflow-yolov4-tflite
+	url = https://github.com/hunglc007/tensorflow-yolov4-tflite.git
+[submodule "keras-YOLOv3-model-set"]
+	path = keras-YOLOv3-model-set
+	url = https://github.com/david8862/keras-YOLOv3-model-set
