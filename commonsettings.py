@@ -1,5 +1,7 @@
 import json, os, re, math
 
+privateSettings = json.load('commonsettings.json')
+
 def imShow(path, cvtColor=False, resize=False):
     import cv2
     import matplotlib.pyplot as plt
@@ -19,12 +21,12 @@ def imShow(path, cvtColor=False, resize=False):
 def getLabelStudioData():
     import requests
     session_requests = requests.session()
-    session_requests.headers.update({'Authorization': 'Token 21def27b3c847debd02963eb70a0db33b6375991'})
-    r = session_requests.get('http://192.168.10.200:8081/api/projects/2/tasks?page_size=9999&page=1')
+    session_requests.headers.update({'Authorization': privateSettings['labelStudioAuthToken']})
+    r = session_requests.get(privateSettings['labelStudioGetDataPath'])
     rawSrcAnnotations = r.json()
     return rawSrcAnnotations
 
-def generatePaths(targetOssep="/", traindataSrcPathBase = '/opt/mnt/code-391ff5ac-6576-460f-ba4d-7e03433c68b6/Users/Jerry.Hsieh/coffeebeans/darknet/data', traindataSrcPathBaseDisplayed = '/opt/mnt/code-391ff5ac-6576-460f-ba4d-7e03433c68b6/Users/Jerry.Hsieh/coffeebeans/darknet/data', specificProjName = 'purebeans_tiny_filtered_w608h608_20210609'):
+def generatePaths(targetOssep="/", traindataSrcPathBase = '/opt/mnt/coffeebeans/darknet/data', traindataSrcPathBaseDisplayed = '/opt/mnt/code-391ff5ac-6576-460f-ba4d-7e03433c68b6/Users/Jerry.Hsieh/coffeebeans/darknet/data', specificProjName = 'purebeans_tiny_filtered_w608h608_20210609'):
     #traindataSrcPathBase = os.path.join(os.sep, "mnt", "f", "coffeebeans", "data") #WSL
     #traindataSrcPathBase = "/content" #google colab
     #traindataSrcPathBase = os.path.join("F:", os.sep, "coffeebeans", "data") #Windows
