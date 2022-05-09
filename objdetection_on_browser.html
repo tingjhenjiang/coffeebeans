@@ -1,0 +1,450 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://unpkg.com/@tensorflow/tfjs/dist/tf.min.js"></script>
+    <title>Object Detection With OpenCV.js Camera and Tensorflow.js</title>
+    <style>
+        .actionBtn, .custom-select { font-size:250%;}
+        .baroptions, #defectRateDiv { font-size:150%; line-height:300%;}
+        .baroptions input {width:60%;}
+        .actionBtn {padding: 20px;}
+        .aligncenter, #canvasOutput { text-align:center; }
+        #video, #canvasOutput {clear:both;}
+        .displayhidden {display:none;}
+    </style>
+</head>
+<body>
+
+<script async src="opencv.js" type="text/javascript" onload="onCvLoaded();"></script>
+
+<div class="aligncenter">
+    <div class="aligncenter" style="display:block;">
+        <div style="float:left;width:45%;">
+            <h2>Choose Camera</h2>
+            <div id="video-options">
+                <select name="video-options-selectname" id="video-options-selectid" class="custom-select">
+                    <option value="">Select camera</option>
+                </select>
+            </div>
+        </div>
+        <div style="float:left;width:45%;clear:right;">
+            <h2>Choose Model</h2>
+            <div id="objtodetect-options">
+                <select name="objtodetect-options-selectname" id="objtodetect-options-selectid" class="custom-select">
+                    <option value="beans" selected="">咖啡豆檢測</option>
+                    <option value="coco">COCO</option>
+                </select><br>
+                detects following objects: <span id="objtodetectsummaryspan"></span>
+            </div>
+        </div>
+    </div>
+    
+    <div>
+        <video id="video"></video>
+        <canvas id="canvasOutput"></canvas>
+    </div>
+    <div>
+        <div id="defectRateDiv"><span id="defectRatePrefix"></span><span id="defectRate"></span></div>
+        <p><button id="actionBtn" class="actionBtn">Start Detection</button></p>
+        <div class="baroptions">
+            Height: <input type="range" id="targetheight" name="targetheight" min="100" max="2000" step="10"><br>
+            Width: <input type="range" id="targetwidth" name="targetwidth" min="100" max="2000" step="10"><br>
+            FPS: <input type="range" id="targetFPS" name="targetFPS" min="0.1" max="40" step="0.1" value="0.1"><br>
+            Alpha(Contrast): <input type="range" id="alpha" name="alpha" min="0" max="3" step="0.1"><br>
+            Beta(Brightness): <input type="range" id="beta" name="beta" min="-500" max="500" step="0.25"><br>
+            <div class="displayhidden" style="display:none;">
+                Brightness: <input type="range" id="targetbrightness" name="targetbrightness" min="-64" max="64"><br>
+                Contrast: <input type="range" id="targetcontrast" name="targetcontrast" min="0" max="100"><br>
+                Color Temparature: <input type="range" id="targetcolortemperature" name="targetcolortemperature" min="2800" max="6500"><br>
+                Sharpness: <input type="range" id="targetsharpness" name="targetsharpness" min="0" max="100">
+            </div>
+        </div>
+    </div>
+</div>
+
+<script type="module">
+    //import yolopostprocess from './tfjs-yolo-tiny.js';
+    import postprocess from './tfjs-yolo-tiny-postprocess.js';
+    globalThis.yolopostprocess = postprocess;
+    import {v3_tiny_anchors} from './tfjs-yolo-tiny-config.js';
+    globalThis.yolov3_tiny_anchors = v3_tiny_anchors;
+</script>
+
+<script>
+loadLabels = async function(labelsUrl) {
+    let response = await fetch(labelsUrl);
+    let label = await response.text();
+    label = label.split('\n');
+    return label;
+}
+class L2 {
+    static className = 'L2';
+    constructor(config) {
+        return tf.regularizers.l1l2(config)
+    }
+}
+tf.serialization.registerClass(L2);
+class groupRoute extends tf.layers.Layer {
+    constructor(config) {
+        super(config);
+        this.numorsizessplits = config.function[2][1];
+        this.groupid = config.function[2][0];
+    }
+    call(inputs, kwargs) {
+        let input = inputs;
+        if (Array.isArray(input)) {
+            input = input[0];
+        }
+        const origShape = input.shape;
+        var layeroutput = tf.split(input, this.numorsizessplits, -1);
+        layeroutput = layeroutput[this.groupid];
+        return layeroutput;
+    }
+    computeOutputShape(inputShape) {
+        return [inputShape[0], inputShape[1], inputShape[2], inputShape[3]/this.numorsizessplits];
+    }
+    static className = 'groupRoute';
+    static get className() {
+        return 'groupRoute';
+    }
+}
+tf.serialization.registerClass(groupRoute);
+
+const cameraOptions = document.querySelector('#video-options>select');
+
+var videoStreamingConstraints;
+var updatedVideoConstraints;
+const getCameraSelection = async () => {
+    await navigator.mediaDevices.getUserMedia({video: true});
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevices = devices.filter(device => device.kind === 'videoinput');
+    const options = videoDevices.map(videoDevice => {
+        return `<option value="${videoDevice.deviceId}">${videoDevice.label}</option>`;
+    });
+    cameraOptions.innerHTML = options.join('');
+    videoStreamingConstraints = { video: { deviceId: { exact: cameraOptions.value } }, audio: false };
+};
+getCameraSelection();
+
+
+/*
+https://www.digitalocean.com/community/tutorials/front-and-rear-camera-access-with-javascripts-getusermedia
+https://stackoverflow.com/questions/61105600/tensorflow-js-error-weights-are-not-set-when-loading-converted-model-with-ba
+https://github.com/habbes/opencv-web-video/blob/master/camera.html
+https://docs.opencv.org/3.4/df/d24/tutorial_js_image_display.html
+*/
+function onCvLoaded () {
+    console.log('cv', cv);
+    cv.onRuntimeInitialized = onReady;
+}
+
+swapRB = false;
+confThreshold = 0.5;
+nmsThreshold = 0.4;
+
+const video = document.getElementById('video');
+const actionBtn = document.getElementById('actionBtn');
+const alpha = document.getElementById('alpha');
+const beta = document.getElementById('beta');
+const targetHeight = document.getElementById('targetheight');
+const targetWidth = document.getElementById('targetwidth');
+const targetFPS = document.getElementById('targetFPS');
+const targetBrightness = document.getElementById('targetbrightness');
+const targetContrast = document.getElementById('targetcontrast');
+const targetColorTemperature = document.getElementById('targetcolortemperature');
+const targetSharpness = document.getElementById('targetsharpness');
+const defectRateDom = document.getElementById('defectRate');
+
+
+function getWidth(mode='min') {
+  var widths = Array(document.body.scrollWidth,
+    document.documentElement.scrollWidth,
+    document.body.offsetWidth,
+    document.documentElement.offsetWidth,
+    document.documentElement.clientWidth);
+  if (mode=="max") {
+    return Math.max(...widths);
+  } else {
+    return Math.min(...widths); //window.innerWidth
+  }
+}
+
+function getHeight(mode='min') {
+  var heights = Array(document.body.scrollHeight,
+    document.documentElement.scrollHeight,
+    document.body.offsetHeight,
+    document.documentElement.offsetHeight,
+    document.documentElement.clientHeight
+  );
+  if (mode=="max") {
+    return Math.max(...heights);
+  } else {
+    return Math.min(...heights); //window.innerWidth
+  }
+}
+
+var suitableWidth = Math.round(getWidth('max')*0.9);
+video.setAttribute('height', getHeight('min') );
+video.setAttribute('width', suitableWidth  );
+targetwidth.value = suitableWidth;
+
+const srcwidth = Number(video.width); //document.getElementById("video").getAttribute("srcwidth")
+const srcheight = Number(video.height); //document.getElementById("video").getAttribute("srcheight")
+
+
+const origStreamSize = [srcheight, srcwidth];
+var FPS = 40;
+
+const objToDetectOptions = document.querySelector('#objtodetect-options>select');
+const objtodetectsummaryspan = document.getElementById('objtodetectsummaryspan');
+const defectRatePrefix = document.getElementById('defectRatePrefix');
+var modelPath,labelsUrl,modelInputSize,model,inputSize,labels,usingCaseIsCoffeeBeans,initClassItemCounts;
+function generateModelSettings(needmodel="beans") {
+    if (needmodel=="coco") {
+        modelPath = './models/yolov4_tiny_coco/model.json';
+        labelsUrl = './models/yolov4_tiny_coco/coco.names';
+        modelInputSize = 416;
+        defectRatePrefix.innerText = "";
+    } else {
+        modelPath = './models/3classbeans_yolov4_tiny/model.json';
+        labelsUrl = './models/3classbeans_yolov4_tiny/obj.names';
+        modelInputSize = 512;
+        defectRatePrefix.innerText = "瑕疵率 壞÷(好+壞): ";
+    }
+    model = tf.loadLayersModel(modelPath);
+    inputSize = [modelInputSize, modelInputSize];
+    labels = loadLabels(labelsUrl);
+    labels.then(function(data) {
+        usingCaseIsCoffeeBeans = data.includes("UnlabelledBean");
+        initClassItemCounts = Object.fromEntries(data.map(key => [key, 0]));
+        Object.freeze(initClassItemCounts);
+        labels = data;
+        objtodetectsummaryspan.innerText = labels.join(',');
+    });
+    
+}
+generateModelSettings();
+
+objToDetectOptions.addEventListener('change', () => {
+    generateModelSettings(objToDetectOptions.value);
+});
+
+let stream;
+let streaming = false;
+function onReady () {
+    let src;
+    let dst;
+    let resizedSrc;
+    let resizeTargetWidth = suitableWidth; //getWidth();
+    let resizeTargetHeight = getHeight();
+    let adjustPixelRescaleAlpha = false;
+    let adjustPixelRescaleBeta = false;
+    let convertAlpha = 1;
+    let convertBeta = 0;
+    let modelInputImg;
+    let badBeansToGoodBeansRatio;
+    const cap = new cv.VideoCapture(video);
+
+    function getUpdatedVideoConstraints() {
+        updatedVideoConstraints = {
+            ...videoStreamingConstraints,
+            video: {
+                deviceId: { exact: cameraOptions.value },
+                brightness: { exact: parseInt(document.querySelector('input[id=targetbrightness]').value) },
+                contrast: { exact: parseInt(document.querySelector('input[id=targetcontrast]').value) },
+                colorTemperature: { exact: parseInt(document.querySelector('input[id=targetcolortemperature]').value) },
+                sharpness: { exact: parseInt(document.querySelector('input[id=targetsharpness]').value) },
+            }
+        };
+    }
+
+    actionBtn.addEventListener('click', () => {
+        if (streaming) {
+            actionBtn.textContent = 'Start Detection';
+            stop();
+        } else {
+            actionBtn.textContent = 'Stop Detection';
+            getUpdatedVideoConstraints();
+            start();
+        }
+    });
+
+    function start () {
+        navigator.mediaDevices.getUserMedia(updatedVideoConstraints)
+        .then(_stream => {
+            stream = _stream;
+            //console.log('updatedVideoConstraints is', updatedVideoConstraints);
+            //console.log('stream is ', stream);
+            var track = stream.getVideoTracks()[0];
+            //console.log('track is', track);
+            var videoTrackConstraints = track.getConstraints();
+            //console.log('videoTrackConstraints is', videoTrackConstraints);
+            //var videoCapabilities = track.getCapabilities();
+            //console.log('videoCapabilities is', videoCapabilities);
+            //videoCapabilities['brightness'] = -64;
+            //var constraintsApplied = track.applyConstraints(videoCapabilities);
+            //globalThis.stream = stream;
+            //globalThis.track = track;
+            //let imageCapture = new ImageCapture(track);
+            //console.log('imageCapture is', imageCapture);
+            video.srcObject = stream;
+            video.play();
+            streaming = true;
+            src = new cv.Mat(srcheight, srcwidth, cv.CV_8UC4);
+            resizedSrc = new cv.Mat();
+            dst = new cv.Mat(); //new cv.Mat();
+            modelInputImg = new cv.Mat();
+            setTimeout(processVideo, 0);
+        })
+        .catch(err => console.log(`An error occurred: ${err}`));
+    }
+
+    function stop () {
+        if (video) {
+            video.pause();
+            video.srcObject = null;
+        }
+        if (stream) {
+            stream.getVideoTracks()[0].stop();
+        }
+        streaming = false;
+    }
+    
+    function drawBox(box, drawOnImage, scaleFactorX=1, scaleFactorY=1) {
+        let left = box['left']*scaleFactorX;
+        let top = box['top']*scaleFactorY;
+        let width = box['width']*scaleFactorX;
+        let height = box['height']*scaleFactorY;
+        let score = box['score'];
+        let boxclass = box['class'];
+        cv.rectangle(drawOnImage, new cv.Point(left, top), new cv.Point(left + width, top + height), new cv.Scalar(255, 215, 0, 50));
+        cv.rectangle(drawOnImage, new cv.Point(left, top), new cv.Point(left + width, top + 17), new cv.Scalar(255, 215, 0, 50), cv.FILLED);
+        let text = `${boxclass}: ${score.toFixed(2)}`;
+        cv.putText(drawOnImage, text, new cv.Point(left, top + 17), cv.FONT_HERSHEY_DUPLEX, 0.5, new cv.Scalar(0, 0, 0, 255), 1, cv.FILLED); //cv.LINE_AA
+    }
+
+    function convertImageResize(img, convertwidth, convertheight) {
+        let dstimg = new cv.Mat();
+        cv.resize(img, dstimg, new cv.Size(convertwidth, convertheight), 0, 0, cv.INTER_AREA);
+        return dstimg;
+    }
+
+    function convertImagePixelRescale(img, convertAlpha, convertBeta) {
+        let dstimg = new cv.Mat();
+        cv.convertScaleAbs(img, dstimg, convertAlpha, convertBeta);
+        return dstimg;
+    }
+
+    targetHeight.addEventListener('input', () => {
+        resizeTargetHeight = parseInt(document.querySelector('input[id=targetheight]').value);
+    });
+    targetWidth.addEventListener('input', () => {
+        resizeTargetWidth = parseInt(document.querySelector('input[id=targetwidth]').value);
+    });
+    alpha.addEventListener('input', () => {
+        adjustPixelRescaleAlpha = true;
+        convertAlpha = parseFloat(document.querySelector('input[id=alpha]').value);
+    });
+    beta.addEventListener('input', () => {
+        adjustPixelRescaleBeta = true;
+        convertBeta = parseFloat(document.querySelector('input[id=beta]').value);
+    });
+    targetFPS.addEventListener('input', () => {
+        FPS = parseInt(document.querySelector('input[id=targetFPS]').value);
+    });
+    targetBrightness.addEventListener('input', () => {
+        stop();
+        getUpdatedVideoConstraints();
+        start();
+    });
+    targetContrast.addEventListener('input', () => {
+        stop();
+        getUpdatedVideoConstraints();
+        start();
+    });
+    targetColorTemperature.addEventListener('input', () => {
+        stop();
+        getUpdatedVideoConstraints();
+        start();
+    });
+    targetSharpness.addEventListener('input', () => {
+        stop();
+        getUpdatedVideoConstraints();
+        start();
+    });
+
+    function processVideo () {
+        let modelInput;
+
+        if (!streaming) {
+            src.delete();
+            dst.delete();
+            modelInputImg.delete();
+            return;
+        }
+        const begin = Date.now();
+        cap.read(src);
+        cv.resize(src, dst, new cv.Size(resizeTargetWidth, resizeTargetHeight), 0, 0, cv.INTER_AREA);
+        
+        if (adjustPixelRescaleAlpha || adjustPixelRescaleBeta) {
+            dst = convertImagePixelRescale(dst, convertAlpha, convertBeta);
+            /*dst = newdst;
+            newdst.delete();*/
+        }
+        
+        cv.resize(dst, modelInputImg, new cv.Size(modelInputSize, modelInputSize), 0, 0, cv.INTER_AREA);
+        scaleFactorX = resizeTargetWidth/modelInputSize;
+        scaleFactorY = resizeTargetHeight/modelInputSize;
+        modelInput = tf.browser.fromPixels(
+            new ImageData(new Uint8ClampedArray(modelInputImg.data), modelInputImg.cols, modelInputImg.rows)
+        ).expandDims(0).div(tf.scalar(255));
+        var totalUnlabelledBeans = 0;
+        var totalBadBeans = 0;
+
+        bboxes = model.then(function (res) {
+            postprocessRes = yolopostprocess(
+                'v3tiny', //version,
+                res.predict(modelInput),
+                yolov3_tiny_anchors,
+                labels.length, //numClasses,
+                labels, //classNames,
+                inputSize, //imageShape,
+                // maxBoxesPerClass,
+                150, //maxBoxes,
+                0.5, //scoreThreshold,
+                0.5, //iouThreshold
+            );
+            return postprocessRes;
+            
+        }, function (err) {
+            console.log(err);
+        }).then(function(res) {
+            if (res.length>0) {
+                if (usingCaseIsCoffeeBeans==true) {
+                    coffeeBeansCounts = JSON.parse(JSON.stringify(initClassItemCounts));
+                }
+                for (var box of res) {
+                    drawBox(box, dst, scaleFactorX, scaleFactorY);
+                    if (usingCaseIsCoffeeBeans==true) {
+                        coffeeBeansCounts[box['class']] = coffeeBeansCounts[box['class']]+1;
+                    }
+                }
+                if (usingCaseIsCoffeeBeans==true) {
+                    badBeansToGoodBeansRatio = coffeeBeansCounts['BadBean']/(coffeeBeansCounts['GoodBean']+coffeeBeansCounts['BadBean']);
+                    defectRateDom.innerText = badBeansToGoodBeansRatio;
+                }
+            }
+
+            cv.imshow('canvasOutput', dst);
+            tf.dispose(modelInput);
+            return res;
+        });
+        const delay = 1000/FPS - (Date.now() - begin);
+        setTimeout(processVideo, delay);
+    }
+}
+</script>
+
+</body>
+</html>
